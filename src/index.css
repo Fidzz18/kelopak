@@ -1,0 +1,7 @@
+@import "tailwindcss";
+@theme { --color-plum: #4a1d3f; --color-peony: #e0457f; --color-blush: #fde6ef; }
+body { @apply bg-[#fbf7f9] text-stone-800 antialiased; }
+.btn { @apply inline-flex items-center justify-center rounded-full bg-peony px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed; }
+.btn-alt { @apply bg-white text-plum border border-stone-200; }
+.inp { @apply w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm; }
+.box { @apply rounded-2xl border border-stone-200 bg-white p-4; }
