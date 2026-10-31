@@ -3,11 +3,13 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { supabase, rp } from '../lib/supabase'
 import { useAuth } from '../context/Auth.jsx'
 import { useCart } from '../context/Cart.jsx'
-import { ProductCard } from '../components/ui.jsx'
+import { useStore } from '../context/Store.jsx'
+import { ProductCard, StoreSelect } from '../components/ui.jsx'
 import { useSettings, hhmm } from '../lib/settings'
 import { mapsLink } from '../lib/geo'
+import { stockAt } from '../lib/stock'
 
-const SEL = '*, categories(name)'
+const SEL = '*, categories(name), store_stock(stock, stores(id, name, is_active))'
 const waLink = (phone) => {
   const d = String(phone ?? '').replace(/\D/g, '')
   return d ? 'https://wa.me/' + (d.startsWith('0') ? '62' + d.slice(1) : d) : null
@@ -36,7 +38,7 @@ export function Home() {
   return (
     <>
       {/* Hero */}
-      <section className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-plum to-[#7a2d63] p-8 text-white md:p-12">
+      <section className="relative isolate overflow-hidden rounded-3xl bg-gradient-to-br from-plum to-[#7a2d63] p-8 text-white md:p-12">
         <div className="relative z-10 grid items-center gap-6 md:grid-cols-[1.3fr_1fr]">
           <div>
             <span className="rounded-full bg-white/15 px-3 py-1 text-xs font-semibold">Toko bunga Yogyakarta</span>
@@ -65,7 +67,10 @@ export function Home() {
       {/* Kategori */}
       {cats.length > 0 && (
         <>
-          <h2 className="mb-3 mt-10 text-2xl font-bold text-plum">Kategori</h2>
+          <div className="mb-3 mt-10 flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-2xl font-bold text-plum">Kategori</h2>
+            <StoreSelect />
+          </div>
           <div className="flex flex-wrap gap-2">
             {cats.map((c) => <Link key={c.id} to={`/katalog?kategori=${c.id}`} className="btn btn-alt !px-5 !py-2.5">{c.name}</Link>)}
           </div>
@@ -140,6 +145,7 @@ export function Catalog() {
   useEffect(() => {
     const ch = supabase.channel('catalog-products')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'products' }, () => setTick((t) => t + 1))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'store_stock' }, () => setTick((t) => t + 1))
       .subscribe()
     return () => { supabase.removeChannel(ch) }
   }, [])
@@ -163,7 +169,10 @@ export function Catalog() {
   const pages = Math.max(1, Math.ceil(count / PER))
   return (
     <>
-      <h1 className="text-2xl font-bold text-plum">Katalog buket</h1>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h1 className="text-2xl font-bold text-plum">Katalog buket</h1>
+        <StoreSelect />
+      </div>
       <div className="my-4 grid gap-2 md:grid-cols-4">
         <input className="inp" placeholder="Cari buket…" value={f.q} onChange={(e) => set('q', e.target.value)} />
         <select className="inp" value={f.cat} onChange={(e) => set('cat', e.target.value)}><option value="">Semua kategori</option>{cats.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
@@ -180,6 +189,7 @@ export function ProductDetail() {
   const { id } = useParams()
   const { user } = useAuth()
   const { add } = useCart()
+  const { storeId, pick } = useStore()
   const nav = useNavigate()
   const [p, setP] = useState(null)
   useEffect(() => {
@@ -187,11 +197,14 @@ export function ProductDetail() {
     load()
     const ch = supabase.channel('product-' + id)
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'products', filter: `id=eq.${id}` }, load)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'store_stock', filter: `product_id=eq.${id}` }, load)
       .subscribe()
     return () => { supabase.removeChannel(ch) }
   }, [id])
   if (p === null) return <p className="text-stone-500">Memuat…</p>
   if (p === false) return <p>Produk tidak ditemukan.</p>
+  const here = stockAt(p, storeId)
+  const rows = (p.store_stock ?? []).filter((r) => r.stores?.is_active).sort((a, b) => a.stores.name.localeCompare(b.stores.name))
   return (
     <div className="grid gap-6 md:grid-cols-2">
       <div className="grid h-80 place-items-center overflow-hidden rounded-3xl bg-blush text-9xl">{p.image_url ? <img src={p.image_url} alt={p.name} className="h-full w-full object-cover" /> : '💐'}</div>
@@ -200,8 +213,23 @@ export function ProductDetail() {
         <h1 className="text-3xl font-bold text-plum">{p.name}</h1>
         <p>{p.description}</p>
         <p className="text-2xl font-bold text-peony">{rp(p.price)}</p>
-        <p className={p.stock <= 3 ? 'font-bold text-orange-700' : 'text-stone-500'}>{p.stock ? `Stok tersisa ${p.stock}` : 'Stok habis'}</p>
-        <button className="btn mt-2 self-start" disabled={!p.stock} onClick={async () => { if (!user) return nav('/masuk'); try { await add(p); nav('/keranjang') } catch (e) { alert(e.message) } }}>Tambah ke keranjang</button>
+
+        <div className="rounded-xl bg-blush p-3 text-sm">
+          <b className="text-plum">Stok per toko</b>
+          {rows.map((r) => (
+            <button key={r.stores.id} type="button" onClick={() => pick(r.stores.id)}
+              className={`mt-1 flex w-full items-center justify-between rounded-lg border px-2 py-1 text-left ${r.stores.id === storeId ? 'border-peony bg-white' : 'border-transparent hover:bg-white/60'}`}>
+              <span>{r.stores.name}{r.stores.id === storeId && <span className="ml-2 text-xs text-peony">dipilih</span>}</span>
+              <b className={r.stock <= 3 ? 'text-orange-700' : ''}>{r.stock || 'Habis'}</b>
+            </button>
+          ))}
+          {!rows.length && <p className="text-stone-500">Belum ada stok di toko mana pun.</p>}
+        </div>
+
+        <button className="btn mt-2 self-start" disabled={!here}
+          onClick={async () => { if (!user) return nav('/masuk'); try { await add({ ...p, stock: here }); nav('/keranjang') } catch (e) { alert(e.message) } }}>
+          {here ? 'Tambah ke keranjang' : 'Stok habis di toko ini'}
+        </button>
       </div>
     </div>
   )

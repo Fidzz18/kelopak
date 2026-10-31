@@ -2,6 +2,8 @@ import { Link, NavLink, Navigate, Outlet, useNavigate } from 'react-router-dom'
 import { supabase, rp } from '../lib/supabase'
 import { useAuth } from '../context/Auth.jsx'
 import { useCart } from '../context/Cart.jsx'
+import { useStore } from '../context/Store.jsx'
+import { perStore, stockAt } from '../lib/stock'
 
 export function Layout() {
   const { user, profile, isAdmin } = useAuth()
@@ -10,7 +12,7 @@ export function Layout() {
   const l = ({ isActive }) => `rounded-full px-3 py-1.5 text-sm ${isActive ? 'bg-blush font-bold text-plum' : ''}`
   return (
     <>
-      <header className="sticky top-0 z-10 flex flex-wrap items-center gap-2 border-b border-stone-200 bg-[#fbf7f9] px-5 py-3">
+      <header className="sticky top-0 z-20 flex flex-wrap items-center gap-2 border-b border-stone-200 bg-[#fbf7f9] px-5 py-3">
         <Link to="/" className="mr-auto text-xl font-bold text-plum">🌸 Kelopak Jogja</Link>
         <nav className="flex flex-wrap gap-1">
           <NavLink to="/" end className={l}>Beranda</NavLink>
@@ -49,10 +51,13 @@ export function RequireAuth({ admin }) {
 export function ProductCard({ p }) {
   const { user } = useAuth()
   const { add } = useCart()
+  const { storeId } = useStore()
   const nav = useNavigate()
+  const here = stockAt(p, storeId)
+  const elsewhere = perStore(p).filter((r) => r.stores.id !== storeId)
   const onAdd = async () => {
     if (!user) return nav('/masuk')
-    try { await add(p) } catch (e) { alert(e.message) }
+    try { await add({ ...p, stock: here }) } catch (e) { alert(e.message) }   // batas jumlah = stok toko terpilih
   }
   return (
     <div className="box flex flex-col gap-1 overflow-hidden !p-0">
@@ -63,9 +68,27 @@ export function ProductCard({ p }) {
         <Link to={`/produk/${p.id}`} className="font-bold text-plum">{p.name}</Link>
         <span className="text-xs text-stone-500">{p.categories?.name}</span>
         <span className="font-bold text-peony">{rp(p.price)}</span>
-        <span className={`text-xs ${p.stock <= 3 ? 'font-bold text-orange-700' : 'text-stone-500'}`}>{p.stock ? `Stok ${p.stock}` : 'Stok habis'}</span>
-        <button className="btn mt-auto" disabled={!p.stock} onClick={onAdd}>Tambah ke keranjang</button>
+        <span className={`text-xs ${here <= 3 ? 'font-bold text-orange-700' : 'text-stone-500'}`}>
+          {here ? `Stok di toko ini: ${here}` : 'Stok habis di toko ini'}
+        </span>
+        {!here && elsewhere.length > 0 && (
+          <span className="text-xs text-stone-500">Tersedia di {elsewhere.map((r) => r.stores.name).join(', ')}</span>
+        )}
+        <button className="btn mt-auto" disabled={!here} onClick={onAdd}>Tambah ke keranjang</button>
       </div>
     </div>
+  )
+}
+
+export function StoreSelect() {
+  const { stores, storeId, pick } = useStore()
+  if (!stores.length) return null
+  return (
+    <label className="flex items-center gap-2 text-sm text-stone-600">
+      <span>🏬 Toko</span>
+      <select className="inp !w-auto !py-1.5" value={storeId} onChange={(e) => pick(e.target.value)}>
+        {stores.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+      </select>
+    </label>
   )
 }

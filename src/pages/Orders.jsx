@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { supabase, rp, STATUS, PAY } from '../lib/supabase'
 import { useAuth } from '../context/Auth.jsx'
@@ -7,6 +7,9 @@ import { useSettings, hhmm } from '../lib/settings'
 import { waLink } from '../lib/wa'
 import { km, fmtKm, routeMatrix, feeFor } from '../lib/geo'
 import LocationSearch from '../components/LocationSearch.jsx'
+import { useStore } from '../context/Store.jsx'
+import { useOrderList } from '../lib/useOrders'
+import OrderSearch from '../components/OrderSearch.jsx'
 
 export function CartPage() {
   const { items, setQty, total } = useCart()
@@ -35,6 +38,7 @@ export function CartPage() {
 
 export function Checkout() {
   const { items, total, reload } = useCart()
+  const { storeId: picked } = useStore()
   const st = useSettings()
   const { profile } = useAuth()
   const nav = useNavigate()
@@ -100,8 +104,8 @@ export function Checkout() {
   // Pilih otomatis toko terdekat (lewat jalan) yang bisa memenuhi pesanan
   useEffect(() => {
     const ok = opts.filter((o) => o.ok)
-    setStoreId((cur) => (dest ? (ok[0]?.s.id ?? '') : ''))
-  }, [dest, stores, stockMap, routes, tiers])
+    setStoreId(dest ? ((ok.find((o) => o.s.id === picked) ?? ok[0])?.s.id ?? '') : '')
+  }, [dest, stores, stockMap, routes, tiers, picked])
 
   if (!items.length) return <div className="box">Keranjang kosong. <Link to="/katalog" className="font-bold text-peony">Pilih buket</Link></div>
 
@@ -212,73 +216,127 @@ const msgToShop = (o, ship) =>
 export function Orders() {
   const { user } = useAuth()
   const [skew, setSkew] = useState(0)
-    useEffect(() => {
-      const t0 = Date.now()
-      supabase.rpc('server_now').then(({ data }) => {
-        if (data) setSkew(new Date(data).getTime() - (t0 + Date.now()) / 2)
-      })
-    }, [])
-  const settings = useSettings()
-  const [rows, setRows] = useState(null)
-  const load = useCallback(async () => {
-    const { data } = await supabase.from('orders').select(ORDER_SEL).eq('user_id', user.id).order('created_at', { ascending: false })
-    setRows(data ?? [])
-  }, [user.id])
   useEffect(() => {
-    load()
-    // Status real-time: muat ulang saat order/payment milik pengguna berubah (RLS menyaring event)
-    const ch = supabase.channel('my-orders')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'orders' }, load)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'payments' }, load)
-      .subscribe()
-    return () => { supabase.removeChannel(ch) }
-  }, [load])
+    const t0 = Date.now()
+    supabase.rpc('server_now').then(({ data }) => {
+      if (data) setSkew(new Date(data).getTime() - (t0 + Date.now()) / 2)
+    })
+  }, [])
+  const settings = useSettings()
+  const { rows, hasMore, loadingMore, error, term, search, loadMore, reload: load } =
+    useOrderList({ select: ORDER_SEL, userId: user.id, name: 'my-orders-list' })
+
   const upload = async (o, file) => {
-  if (!file) return
-  if (file.size > 3 * 1024 * 1024) return alert('Ukuran file maksimal 3 MB')
-  const path = `${user.id}/${o.id}-${Date.now()}.${file.name.split('.').pop()}`
-  const up = await supabase.storage.from('payment-proofs').upload(path, file)
-  if (up.error) return alert(up.error.message)
-  const { error } = await supabase.rpc('submit_payment_proof', { p_order: o.id, p_path: path })
-  if (error) {
-    await supabase.storage.from('payment-proofs').remove([path]) // buang berkas yatim
-    return alert(error.message)
+    if (!file) return
+    if (file.size > 3 * 1024 * 1024) return alert('Ukuran file maksimal 3 MB')
+    const path = `${user.id}/${o.id}-${Date.now()}.${file.name.split('.').pop()}`
+    const up = await supabase.storage.from('payment-proofs').upload(path, file)
+    if (up.error) return alert(up.error.message)
+    const { error } = await supabase.rpc('submit_payment_proof', { p_order: o.id, p_path: path })
+    if (error) {
+      await supabase.storage.from('payment-proofs').remove([path]) // buang berkas yatim
+      return alert(error.message)
+    }
+    load()
   }
-  load()
-}
+
   const cancel = async (o) => {
     if (!confirm('Batalkan pesanan ini?')) return
     const { error } = await supabase.rpc('cancel_my_order', { p_order: o.id })
     if (error) alert(error.message)
     load()
   }
+
   const expire = async () => { await supabase.rpc('sweep_expired_orders'); load() }
-  if (!rows) return <p className="text-stone-500">Memuat…</p>
+
+  // Tidak ada "if (!rows) return ..." di sini, supaya judul dan kolom pencarian tetap tampil saat memuat.
   return (
     <>
-      <h1 className="text-2xl font-bold text-plum">Pesanan saya</h1>
-      {!rows.length && <div className="box mt-4">Belum ada pesanan.</div>}
-      {rows.map((o) => {
-        const pay = o.payments?.[0] ?? o.payments, ship = o.shipping_details?.[0] ?? o.shipping_details
-        return (
-          <div key={o.id} className="box mt-4">
-            <div className="flex items-center justify-between"><div><b>Pesanan #{o.order_no}</b><br /><span className="text-xs text-stone-500">Kirim {ship?.delivery_date} pukul {ship?.delivery_time?.slice(0, 5)}</span></div><Badge s={o.status} /></div>
-            {o.order_items.map((i, k) => <div key={k} className="flex justify-between border-b border-stone-100 py-2 text-sm last:border-0"><span className="text-xs text-stone-500">Kirim {ship?.delivery_date} pukul {ship?.delivery_time?.slice(0, 5)}{o.stores?.name && ` · ${o.stores.name}`}</span></div>)}
-            {+o.shipping_fee > 0 && <div className="flex justify-between border-b border-stone-100 py-2 text-sm"><span>Ongkos kirim{ship?.route_km ? ` (${ship.route_km} km)` : ''}</span><span>{rp(o.shipping_fee)}</span></div>}
-            {o.status === 'pending' && ['unverified', 'rejected'].includes(pay?.status) && <PayInfo o={o} s={settings} skew={skew} onCancel={() => cancel(o)} onExpire={expire} />}
-            <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
-              <b>Total {rp(o.total_amount)}</b>
-              <span className="text-sm text-stone-500">Pembayaran: {PAY[pay?.status]}</span>
-              {o.status !== 'cancelled' && ['unverified', 'rejected'].includes(pay?.status) && (
-                <label className="btn cursor-pointer">Unggah bukti transfer<input type="file" accept="image/*,.pdf" hidden onChange={(e) => upload(o, e.target.files[0])} /></label>
-              )}
-              {settings?.shop_phone && o.status !== 'cancelled' && (
-                <a className="btn btn-alt" target="_blank" rel="noreferrer" href={waLink(settings.shop_phone, msgToShop(o, ship))}>Konfirmasi via WhatsApp</a>
-              )}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h1 className="text-2xl font-bold text-plum">Pesanan saya</h1>
+        <OrderSearch term={term} onSearch={search} />
+      </div>
+
+      {!rows ? (
+        <p className="mt-4 text-stone-500">Memuat…</p>
+      ) : (
+        <>
+          {error && <p role="alert" className="mt-3 rounded-xl bg-red-50 p-2 text-sm text-red-800">{error}</p>}
+
+          {!rows.length && (
+            <div className="box mt-4">
+              {term ? `Tidak ada pesanan dengan nomor "${term}".` : 'Belum ada pesanan.'}
             </div>
-          </div>
-        )
-      })}
+          )}
+
+          {rows.map((o) => {
+            const pay = o.payments?.[0] ?? o.payments
+            const ship = o.shipping_details?.[0] ?? o.shipping_details
+            return (
+              <div key={o.id} className="box mt-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <b>Pesanan #{o.order_no}</b><br />
+                    <span className="text-xs text-stone-500">Kirim {ship?.delivery_date} pukul {ship?.delivery_time?.slice(0, 5)}</span>
+                  </div>
+                  <Badge s={o.status} />
+                </div>
+
+                {o.order_items.map((i, k) => (
+                  <div key={k} className="flex justify-between border-b border-stone-100 py-2 text-sm">
+                    <span>{i.product_name ?? i.products?.name ?? 'Produk dihapus'} × {i.quantity}</span>
+                    <span>{rp(i.price * i.quantity)}</span>
+                  </div>
+                ))}
+
+                {o.stores?.name && <p className="py-1 text-xs text-stone-500">Dari {o.stores.name}</p>}
+
+                {+o.shipping_fee > 0 && (
+                  <div className="flex justify-between border-b border-stone-100 py-2 text-sm">
+                    <span>Ongkos kirim{ship?.route_km ? ` (${ship.route_km} km)` : ''}</span>
+                    <span>{rp(o.shipping_fee)}</span>
+                  </div>
+                )}
+
+                {o.status === 'pending' && ['unverified', 'rejected'].includes(pay?.status) && (
+                  <PayInfo o={o} s={settings} skew={skew} onCancel={() => cancel(o)} onExpire={expire} />
+                )}
+
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                  <b>Total {rp(o.total_amount)}</b>
+                  <span className="text-sm text-stone-500">Pembayaran: {PAY[pay?.status]}</span>
+
+                  {o.status !== 'cancelled' && ['unverified', 'rejected'].includes(pay?.status) && (
+                    <label className="btn cursor-pointer">
+                      Unggah bukti transfer
+                      <input type="file" accept="image/*,.pdf" hidden onChange={(e) => upload(o, e.target.files[0])} />
+                    </label>
+                  )}
+
+                  {settings?.shop_phone && o.status !== 'cancelled' && (
+                    <a
+                      className="btn btn-alt"
+                      target="_blank"
+                      rel="noreferrer"
+                      href={waLink(settings.shop_phone, msgToShop(o, ship))}
+                    >
+                      Konfirmasi via WhatsApp
+                    </a>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+
+          {hasMore && (
+            <div className="mt-4 text-center">
+              <button className="btn btn-alt" disabled={loadingMore} onClick={loadMore}>
+                {loadingMore ? 'Memuat…' : 'Muat 10 pesanan lagi'}
+              </button>
+            </div>
+          )}
+        </>
+      )}
     </>
   )
 }

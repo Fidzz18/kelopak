@@ -4,6 +4,8 @@ import { Badge, ORDER_SEL } from './Orders.jsx'
 import { waLink } from '../lib/wa'
 import { mapsLink } from '../lib/geo'
 import LocationSearch from '../components/LocationSearch.jsx'
+import { useOrderList } from '../lib/useOrders'
+import OrderSearch from '../components/OrderSearch.jsx'
 
 const TABS = [['dash', 'Dasbor'], ['prod', 'Katalog'], ['sto', 'Toko'], ['stk', 'Stok toko'], ['rate', 'Ongkir'], ['ord', 'Pesanan'], ['pay', 'Verifikasi bayar'], ['cus', 'Pelanggan'], ['set', 'Pengaturan']]
 const one = (x) => (Array.isArray(x) ? x[0] : x)
@@ -40,7 +42,7 @@ export default function Admin() {
       <nav className="my-3 flex flex-wrap gap-1">{TABS.map(([k, l]) => <button key={k} onClick={() => setTab(k)} className={`rounded-full px-3 py-1.5 text-sm ${tab === k ? 'bg-blush font-bold text-plum' : ''}`}>{l}</button>)}</nav>
       {tab === 'dash' && <Dash orders={orders} products={products} />}
       {tab === 'prod' && <Products products={products} cats={cats} run={run} reload={load} />}
-      {tab === 'ord' && <OrderList orders={orders} run={run} />}
+      {tab === 'ord' && <OrderList run={run} />}
       {tab === 'pay' && <Payments orders={orders} run={run} />}
       {tab === 'cus' && <Customers orders={orders} />}
       {tab === 'set' && <Settings />}
@@ -83,23 +85,55 @@ function Products({ products, cats, run, reload }) {
 }
 
 function ProductForm({ p, cats, close, done }) {
-  const [f, setF] = useState({ name: p.name, description: p.description ?? '', price: p.price, stock: p.stock, category_id: p.category_id ?? '', is_active: p.is_active })
+  const [f, setF] = useState({ name: p.name, description: p.description ?? '', price: p.price, category_id: p.category_id ?? '', is_active: p.is_active })
+  const [stores, setStores] = useState([])
+  const [vals, setVals] = useState({})
+  const [orig, setOrig] = useState({})
   const [file, setFile] = useState(null)
   const [err, setErr] = useState('')
   const up = (k) => (e) => setF({ ...f, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.value })
+  const num = (v) => Math.max(0, parseInt(v ?? '0', 10) || 0)
+
+  useEffect(() => {
+    ;(async () => {
+      const [s, k] = await Promise.all([
+        supabase.from('stores').select('id, name, is_active').order('name'),
+        p.id ? supabase.from('store_stock').select('store_id, stock').eq('product_id', p.id) : Promise.resolve({ data: [] }),
+      ])
+      const m = Object.fromEntries((k.data ?? []).map((r) => [r.store_id, String(r.stock)]))
+      setStores(s.data ?? []); setVals(m); setOrig(m)
+    })()
+  }, [p.id])
+
   const save = async (e) => {
     e.preventDefault(); setErr('')
-    const row = { ...f, price: +f.price, stock: +f.stock, category_id: f.category_id || null }
+    const row = { ...f, price: +f.price, category_id: f.category_id || null }   // tanpa stock
     if (file) {
       const path = `${crypto.randomUUID()}.${file.name.split('.').pop()}`
       const u = await supabase.storage.from('product-images').upload(path, file)
       if (u.error) return setErr(u.error.message)
       row.image_url = supabase.storage.from('product-images').getPublicUrl(path).data.publicUrl
     }
-    const { error } = p.id ? await supabase.from('products').update(row).eq('id', p.id) : await supabase.from('products').insert(row)
-    if (error) return setErr(error.message)
+    let id = p.id
+    if (id) {
+      const { error } = await supabase.from('products').update(row).eq('id', id)
+      if (error) return setErr(error.message)
+    } else {
+      const { data, error } = await supabase.from('products').insert(row).select('id').single()
+      if (error) return setErr(error.message)
+      id = data.id
+    }
+    // Produk baru: buat baris untuk semua toko. Produk lama: hanya yang berubah.
+    const rows = stores
+      .filter((s) => !p.id || num(vals[s.id]) !== num(orig[s.id]))
+      .map((s) => ({ store_id: s.id, product_id: id, stock: num(vals[s.id]) }))
+    if (rows.length) {
+      const { error } = await supabase.from('store_stock').upsert(rows, { onConflict: 'store_id,product_id' })
+      if (error) return setErr('Produk tersimpan, tetapi stok gagal: ' + error.message)
+    }
     done()
   }
+
   return (
     <div className="fixed inset-0 z-20 grid place-items-center bg-black/50 p-4" onClick={(e) => e.target === e.currentTarget && close()}>
       <form onSubmit={save} className="box grid max-h-[90vh] w-full max-w-md gap-2 overflow-auto">
@@ -107,8 +141,20 @@ function ProductForm({ p, cats, close, done }) {
         {err && <p role="alert" className="rounded-xl bg-red-50 p-2 text-sm text-red-800">{err}</p>}
         <input className="inp" required placeholder="Nama" value={f.name} onChange={up('name')} />
         <select className="inp" value={f.category_id} onChange={up('category_id')}>{cats.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
-        <div className="grid grid-cols-2 gap-2"><input className="inp" type="number" min="0" required placeholder="Harga" value={f.price} onChange={up('price')} /><input className="inp" type="number" min="0" required placeholder="Stok" value={f.stock} onChange={up('stock')} /></div>
+        <input className="inp" type="number" min="0" required placeholder="Harga" value={f.price} onChange={up('price')} />
         <textarea className="inp" rows={3} placeholder="Deskripsi" value={f.description} onChange={up('description')} />
+
+        <div className="rounded-xl bg-blush p-3">
+          <b className="text-xs text-plum">Stok per toko</b>
+          {!stores.length && <p className="text-xs text-stone-500">Belum ada toko. Tambahkan dulu di tab Toko.</p>}
+          {stores.map((s) => (
+            <label key={s.id} className="mt-1 flex items-center justify-between gap-2 text-sm">
+              <span>{s.name}{!s.is_active && <span className="ml-1 text-xs text-stone-500">(nonaktif)</span>}</span>
+              <input className="inp !w-24 !py-1" type="number" min="0" value={vals[s.id] ?? '0'} onChange={(e) => setVals({ ...vals, [s.id]: e.target.value })} />
+            </label>
+          ))}
+        </div>
+
         <input type="file" accept="image/*" onChange={(e) => setFile(e.target.files[0])} className="text-sm" />
         <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={f.is_active} onChange={up('is_active')} /> Tampilkan di katalog</label>
         <div className="flex gap-2"><button className="btn">Simpan produk</button><button type="button" className="btn btn-alt" onClick={close}>Batal</button></div>
@@ -128,12 +174,21 @@ const waUrl = (phone) => {
   return 'https://wa.me/' + (d.startsWith('0') ? '62' + d.slice(1) : d)
 }
 
-function OrderList({ orders, run }) {
+function OrderList({ run }) {
+  const { rows, hasMore, loadingMore, error, term, search, loadMore, reload } =
+    useOrderList({ select: ORDER_SEL, name: 'admin-orders-list' })
+  // setelah aksi admin, muat ulang daftar ini juga
+  const act = async (q) => { await run(q); reload() }
+  if (!rows) return <p className="text-stone-500">Memuat…</p>
   return (
     <div className="grid gap-3">
-      <b className="text-plum">Semua pesanan</b>
-      {!orders.length && <div className="box text-sm text-stone-500">Belum ada pesanan.</div>}
-      {orders.map((o) => {
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <b className="text-plum">Semua pesanan</b>
+        <OrderSearch term={term} onSearch={search} />
+      </div>
+      {error && <p role="alert" className="rounded-xl bg-red-50 p-2 text-sm text-red-800">{error}</p>}
+      {!rows.length && <div className="box text-sm text-stone-500">{term ? `Tidak ada pesanan dengan nomor "${term}".` : 'Belum ada pesanan.'}</div>}
+      {rows.map((o) => {
         const s = one(o.shipping_details)
         const wa = waUrl(s?.phone)
         const editable = !['cancelled', 'completed'].includes(o.status)
@@ -188,8 +243,14 @@ function OrderList({ orders, run }) {
           </div>
         )
       })}
+      {hasMore && (
+        <div className="text-center">
+          <button className="btn btn-alt" disabled={loadingMore} onClick={loadMore}>{loadingMore ? 'Memuat…' : 'Muat 10 pesanan lagi'}</button>
+        </div>
+      )}
     </div>
   )
+  
 }
 
 function Payments({ orders, run }) {

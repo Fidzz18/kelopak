@@ -5,6 +5,7 @@ import App from './App.jsx'
 import { AuthProvider } from './context/Auth.jsx'
 import { CartProvider } from './context/Cart.jsx'
 import './index.css'
+import { StoreProvider } from './context/Store.jsx'
 createRoot(document.getElementById('root')).render(
-  <BrowserRouter><AuthProvider><CartProvider><App /></CartProvider></AuthProvider></BrowserRouter>
+  <BrowserRouter><AuthProvider><CartProvider><StoreProvider><App /></StoreProvider></CartProvider></AuthProvider></BrowserRouter>
 )
