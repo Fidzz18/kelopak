@@ -30,9 +30,18 @@ export function Layout() {
 }
 
 export function RequireAuth({ admin }) {
-  const { user, isAdmin, loading } = useAuth()
+  const { user, isAdmin, loading, profileError, retryProfile } = useAuth()
   if (loading) return <p className="p-8 text-center text-stone-500">Memuat…</p>
   if (!user) return <Navigate to="/masuk" replace />
+  if (profileError) return (
+    <div className="box mx-auto mt-6 grid max-w-sm gap-2 text-sm">
+      <p>Gagal memuat profil Anda. Periksa koneksi lalu coba lagi.</p>
+      <div className="flex gap-2">
+        <button className="btn" onClick={retryProfile}>Coba lagi</button>
+        <button className="btn btn-alt" onClick={() => supabase.auth.signOut()}>Keluar</button>
+      </div>
+    </div>
+  )
   if (admin && !isAdmin) return <Navigate to="/" replace />
   return <Outlet />
 }
